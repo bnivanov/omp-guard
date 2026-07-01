@@ -113,7 +113,7 @@ def build_profile(
     st = _sbpl_literal(str(state_dir))
     tmp = _sbpl_literal(str(tmp_dir))
 
-    # System/runtime read roots the Node runtime and common CLIs need.
+    # System/runtime read roots the Node/Python runtime and common CLIs need.
     # These are read-only; none grant access to user data.
     read_roots = [
         "/usr",
@@ -144,6 +144,8 @@ def build_profile(
     lines.append("(allow sysctl-read)")
     lines.append("(allow mach-lookup) ; broad (DNS/notify daemons); scope in a later pass")
     lines.append("(allow ipc-posix-shm)")
+    lines.append("; prompt_toolkit/Hermes needs terminal ioctl for raw-mode TTY control")
+    lines.append("(allow file-ioctl)")
     lines.append("")
     lines.append("; --- read-only system/runtime paths (no user data) ---")
     lines.append("(allow file-read*")
