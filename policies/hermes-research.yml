@@ -123,6 +123,8 @@ network:
     - "api.openai.com:443"
     - "openrouter.ai:443"
     - "*.openrouter.ai:443"
+    - "opencode.ai:443"
+    - "*.opencode.ai:443"
     - "api.tavily.com:443"
     - "api.exa.ai:443"
     - "api.search.brave.com:443"
