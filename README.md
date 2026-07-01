@@ -1,6 +1,3 @@
-<p align="center">
-  <img width="250" alt="Image" src="https://github.com/user-attachments/assets/c91d67e4-c6a6-46c0-a7dd-4f682cc67193" />
-</p>
 
 # omp-guard — Oh My Pi Agent Guard
 
