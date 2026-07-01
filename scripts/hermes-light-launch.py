@@ -111,6 +111,9 @@ def hermes_runtime_read_paths(hermes_bin: str, actual_home: Path) -> list[Path]:
     The guarded profile must not be allowed to read the whole global
     `~/.hermes` tree because that also contains config, sessions, logs, and
     API keys. We therefore allow only the installed code/venv subtree.
+
+    Hermes' venv may also point at a uv-managed Python interpreter under
+    `~/.local/share/uv/python`, so that runtime is allowed read-only too.
     """
     paths: list[Path] = []
 
@@ -119,7 +122,12 @@ def hermes_runtime_read_paths(hermes_bin: str, actual_home: Path) -> list[Path]:
 
     explicit = os.environ.get("HERMES_GUARD_RUNTIME_DIR", "").strip()
     candidates = [Path(explicit).expanduser()] if explicit else []
-    candidates.append(actual_home / ".hermes" / "hermes-agent")
+    candidates.extend(
+        [
+            actual_home / ".hermes" / "hermes-agent",
+            actual_home / ".local" / "share" / "uv" / "python",
+        ]
+    )
 
     for candidate in candidates:
         try:
