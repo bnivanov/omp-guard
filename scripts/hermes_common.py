@@ -88,6 +88,11 @@ def profile_paths(profile: str) -> dict[str, Path]:
         "xdg_cache": root / "xdg-cache",
         "xdg_data": root / "xdg-data",
         "logs": root / "logs",
+        "sessions": root / "sessions",
+        "state": root / "state",
+        "cron": root / "cron",
+        "kanban": root / "kanban",
+        "checkpoints": root / "checkpoints",
         "skills": root / "skills",
         "memories": root / "memories",
     }
