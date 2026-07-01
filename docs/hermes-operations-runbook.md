@@ -6,7 +6,7 @@
 cd ~/AgentWork/omp-guard
 ./omp-guard doctor
 python3 scripts/seatbelt-selftest.py
-python3 scripts/test-hermes-guard.sh
+bash scripts/test-hermes-guard.sh
 hermes-guard bootstrap-profiles
 hermes-doctor
 ```
