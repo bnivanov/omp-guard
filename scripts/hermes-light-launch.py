@@ -103,6 +103,48 @@ def parse_args(argv: list[str]) -> tuple[argparse.Namespace, list[str]]:
     return args, rest
 
 
+def hermes_runtime_read_paths(hermes_bin: str, actual_home: Path) -> list[Path]:
+    """Return narrow read-only runtime paths needed to execute Hermes itself.
+
+    The installed `hermes` command is usually a small shim in `~/.local/bin`
+    that execs the real CLI from `~/.hermes/hermes-agent/venv/bin/hermes`.
+    The guarded profile must not be allowed to read the whole global
+    `~/.hermes` tree because that also contains config, sessions, logs, and
+    API keys. We therefore allow only the installed code/venv subtree.
+    """
+    paths: list[Path] = []
+
+    hermes_bin_path = Path(hermes_bin).resolve()
+    paths.append(hermes_bin_path.parent)
+
+    explicit = os.environ.get("HERMES_GUARD_RUNTIME_DIR", "").strip()
+    candidates = [Path(explicit).expanduser()] if explicit else []
+    candidates.append(actual_home / ".hermes" / "hermes-agent")
+
+    for candidate in candidates:
+        try:
+            resolved = candidate.resolve()
+        except FileNotFoundError:
+            continue
+        if not resolved.exists():
+            continue
+        # Do not allow the whole global ~/.hermes directory by accident. The
+        # installed code directory is acceptable; ~/.hermes itself is not.
+        if resolved == (actual_home / ".hermes").resolve():
+            die("refusing to allow the whole global ~/.hermes directory as Hermes runtime")
+        paths.append(resolved)
+
+    # Preserve order while removing duplicates.
+    deduped: list[Path] = []
+    seen: set[str] = set()
+    for path in paths:
+        key = str(path)
+        if key not in seen:
+            deduped.append(path)
+            seen.add(key)
+    return deduped
+
+
 def main() -> int:
     args, hermes_args = parse_args(sys.argv[1:])
     profile = args.profile
@@ -111,6 +153,7 @@ def main() -> int:
     except ValueError as exc:
         die(str(exc))
 
+    actual_home = Path.home()
     user = getpass.getuser()
     work_user = os.environ.get("OMP_GUARD_WORK_USER", "")
     if work_user and user != work_user and os.environ.get("OMP_GUARD_ALLOW_OTHER_USER") != "1":
@@ -176,6 +219,7 @@ def main() -> int:
             env["no_proxy"] = "127.0.0.1,localhost"
 
     hermes_argv = [hermes_bin, "gateway", *hermes_args] if args.gateway else [hermes_bin, *hermes_args]
+    runtime_read_paths = hermes_runtime_read_paths(hermes_bin, actual_home)
     ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     make_private_file_append(
         hc.allowed_root() / ".omp-guard-logs" / "hermes-launch.log",
@@ -191,6 +235,7 @@ def main() -> int:
                 f"seatbelt={'on' if enforce else 'off'}",
                 f"seatbelt_detail={cap_detail}",
                 f"egress_proxy={'127.0.0.1:' + str(proxy_port) if proxy_port else 'none'}",
+                f"runtime_read_paths={','.join(str(path) for path in runtime_read_paths)}",
                 f"mode={'gateway' if args.gateway else 'hermes'} {' '.join(hermes_args) if hermes_args else '(interactive)'}",
             ]
         ),
@@ -200,13 +245,12 @@ def main() -> int:
         os.execvpe(hermes_bin, hermes_argv, env)
         return 127
 
-    hermes_dir = Path(hermes_bin).resolve().parent
     sb_profile = seatbelt.build_profile(
         workspace=workdir,
         state_dir=paths["root"],
         tmp_dir=paths["tmp"],
         proxy_port=proxy_port,
-        extra_read_paths=[hermes_dir],
+        extra_read_paths=runtime_read_paths,
     )
     wrapped = seatbelt.wrap_command(profile=sb_profile, argv=hermes_argv)
 
