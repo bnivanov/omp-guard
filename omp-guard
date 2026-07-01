@@ -1,0 +1,104 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import subprocess
+import sys
+from pathlib import Path
+
+
+ROOT = Path(__file__).resolve().parent
+
+
+def usage() -> int:
+    print(
+        """usage:
+  ./omp-guard
+  ./omp-guard menu
+  ./omp-guard status
+  ./omp-guard security
+  ./omp-guard doctor
+  ./omp-guard setup [--backend light|native-mac|docker-sbx]
+  ./omp-guard install-shims [--bin-dir PATH] [--check]
+  ./omp-guard config
+  ./omp-guard mcp-server
+  ./omp-guard validate-policy [policy-path]
+  ./omp-guard classify <command>
+  ./omp-guard run [--approve-ask] [--dry-run] -- <command>
+
+Launchers:
+  ./omp-light    Daily low-RAM mode. No VM.
+  ./omp-sbx      High-isolation Docker/sbx mode. High RAM.
+""",
+        file=sys.stderr,
+    )
+    return 2
+
+
+def run_script(script_name: str, args: list[str], *, preserve_cwd: bool = False) -> int:
+    script = ROOT / "scripts" / script_name
+
+    if not script.exists():
+        print(f"omp-guard: missing script: {script}", file=sys.stderr)
+        return 127
+
+    cwd = None if preserve_cwd else ROOT
+    return subprocess.call([sys.executable, str(script), *args], cwd=cwd)
+
+
+def main() -> int:
+    argv = sys.argv[1:]
+
+    if not argv:
+        return run_script("menu.py", [], preserve_cwd=True)
+
+    if argv[0] in {"-h", "--help", "help"}:
+        return usage()
+
+    command = argv[0]
+    rest = argv[1:]
+
+    if command == "menu":
+        return run_script("menu.py", rest, preserve_cwd=True)
+
+    if command == "status":
+        return run_script("status.py", rest, preserve_cwd=True)
+
+    if command == "security":
+        return run_script("security.py", rest, preserve_cwd=True)
+
+    if command == "doctor":
+        return run_script("doctor.py", rest)
+
+    if command == "setup":
+        return run_script("setup.py", rest)
+
+    if command == "install-shims":
+        return run_script("install-shims.py", rest)
+
+    if command == "config":
+        return run_script("setup.py", ["--show", *rest])
+
+    if command == "mcp-server":
+        return run_script("mcp-server.py", rest)
+
+    if command == "validate-policy":
+        return run_script("validate-policy.py", rest)
+
+    if command == "classify":
+        if not rest:
+            print("usage: ./omp-guard classify <command>", file=sys.stderr)
+            return 2
+        return run_script("classify-command.py", rest)
+
+    if command == "run":
+        if not rest:
+            print("usage: ./omp-guard run [--approve-ask] [--dry-run] -- <command>", file=sys.stderr)
+            return 2
+        return run_script("guard-run.py", rest)
+
+    print(f"omp-guard: unknown command: {command}", file=sys.stderr)
+    return usage()
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

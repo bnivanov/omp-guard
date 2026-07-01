@@ -1,0 +1,247 @@
+#!/usr/bin/env bash
+###############################################################################
+# omp-sbx — launch omp inside a Docker sbx sandbox.
+#
+#   $ omp-sbx              # → resume/reconnect to existing sandbox (or create)
+#   $ omp-sbx --new        # → destroy existing sandbox and create fresh
+#   $ omp-sbx --version    # → passthrough omp flags (via sbx exec)
+#   $ omp-sbx "fix the bug"# → one-shot prompt (via sbx exec)
+#
+# Sandboxes are per-directory: running from the same cwd reconnects to the
+# same sandbox (omp session state persists). Use --new to start fresh.
+#
+# Mounts:
+#   $PWD              → /home/agent/workspace   (primary workspace, rw)
+#   $HOME/.omp        → /Users/<user>/.omp      (host path, rw — configs shared)
+#                       symlinked to /home/agent/.omp by the kit's startup cmd
+###############################################################################
+set -euo pipefail
+
+# Resolve the repo root from the script's location (portable symlink resolution).
+SCRIPT_PATH="$0"
+while [ -L "$SCRIPT_PATH" ]; do
+  SCRIPT_DIR="$(cd "$(dirname "$SCRIPT_PATH")" && pwd)"
+  SCRIPT_PATH="$(readlink "$SCRIPT_PATH")"
+  case "$SCRIPT_PATH" in /*) ;; *) SCRIPT_PATH="$SCRIPT_DIR/$SCRIPT_PATH" ;; esac
+done
+REPO_DIR="$(cd "$(dirname "$SCRIPT_PATH")" && pwd)"
+KIT_DIR="${OMP_SBX_KIT:-$REPO_DIR/sbx-kit}"
+TEMPLATE="${OMP_SBX_TEMPLATE:-omp-sbx:latest}"
+
+# Colors (only when stderr is a tty)
+if [ -t 2 ]; then
+  C_DIM=$'\033[2m'; C_CYAN=$'\033[36m'; C_GREEN=$'\033[32m'
+  C_YELLOW=$'\033[33m'; C_RED=$'\033[31m'; C_BOLD=$'\033[1m'; C_RST=$'\033[0m'
+else
+  C_DIM=''; C_CYAN=''; C_GREEN=''; C_YELLOW=''; C_RED=''; C_BOLD=''; C_RST=''
+fi
+log() { printf '%s\n' "$*" >&2; }
+
+# ── Parse flags ──────────────────────────────────────────────────────────────
+FORCE_NEW=false
+SKIP_PAUSE=false
+OMP_ARGS=()
+for arg in "$@"; do
+  case "$arg" in
+    --new)  FORCE_NEW=true ;;
+    --yes|-y) SKIP_PAUSE=true ;;
+    *)      OMP_ARGS+=("$arg") ;;
+  esac
+done
+if [ ${#OMP_ARGS[@]} -gt 0 ]; then set -- "${OMP_ARGS[@]}"; else set --; fi
+
+# ── Preflight ────────────────────────────────────────────────────────────────
+# shellcheck source=sbx-preflight.sh
+source "$REPO_DIR/sbx-preflight.sh"
+ensure_sbx "omp-sbx"
+
+# Guard-specific OMP state. Do not mount the host's normal ~/.omp or ~/.config/gh by default.
+# Keep state under AgentWork so the sandbox does not inherit broader user auth/config state.
+OMP_GUARD_STATE="${OMP_GUARD_STATE:-$HOME/AgentWork/.omp-guard-state}"
+mkdir -p "$OMP_GUARD_STATE"
+chmod 700 "$OMP_GUARD_STATE"
+
+# Host paths to bind-mount into the sandbox, in addition to the workspace.
+# Only the guard-scoped OMP state is mounted by default.
+# GitHub auth forwarding is intentionally disabled by default.
+MOUNTS=("$OMP_GUARD_STATE")
+
+# ── Workspace path guard ─────────────────────────────────────────────────────
+# omp-guard should only launch from the Agent Lab workspace. This prevents
+# accidental launches from personal files, iCloud, shared folders, or credential
+# directories.
+WORKDIR="$(pwd -P)"
+ALLOWED_ROOT="${OMP_GUARD_ALLOWED_ROOT:-$HOME/AgentWork}"
+
+if [ ! -d "$ALLOWED_ROOT" ]; then
+  log "${C_RED}omp-guard: allowed workspace root does not exist: $ALLOWED_ROOT${C_RST}"
+  exit 1
+fi
+
+ALLOWED_ROOT="$(cd "$ALLOWED_ROOT" && pwd -P)"
+
+: "${OMP_GUARD_PERSONAL_HOME:?omp-guard: OMP_GUARD_PERSONAL_HOME is unset. Set it to your personal home directory (e.g. /Users/yourname) to protect personal paths.}"
+PERSONAL_HOME="$OMP_GUARD_PERSONAL_HOME"
+case "$WORKDIR" in
+  $PERSONAL_HOME|$PERSONAL_HOME/*|/Users/Shared|/Users/Shared/*|"$HOME/Desktop"|"$HOME/Desktop"/*|"$HOME/Documents"|"$HOME/Documents"/*|"$HOME/Downloads"|"$HOME/Downloads"/*|"$HOME/Library/Mobile Documents"|"$HOME/Library/Mobile Documents"/*)
+    log "${C_RED}omp-guard: refusing to launch from sensitive path:${C_RST} $WORKDIR"
+    log "${C_YELLOW}Use a project folder under:${C_RST} $ALLOWED_ROOT"
+    exit 1
+    ;;
+esac
+
+case "$WORKDIR" in
+  */.ssh|*/.ssh/*|*/.config|*/.config/*|*/.aws|*/.aws/*|*/.docker|*/.docker/*|*/.gnupg|*/.gnupg/*|*/.omp|*/.omp/*|*/.omp-guard-state|*/.omp-guard-state/*|*/.claude|*/.claude/*|*/.codex|*/.codex/*)
+    log "${C_RED}omp-guard: refusing to launch from hidden credential/config path:${C_RST} $WORKDIR"
+    log "${C_YELLOW}Use a normal project folder under:${C_RST} $ALLOWED_ROOT"
+    exit 1
+    ;;
+esac
+
+case "$WORKDIR" in
+  "$ALLOWED_ROOT"|"$ALLOWED_ROOT"/*)
+    ;;
+  *)
+    log "${C_RED}omp-guard: refusing to launch outside AgentWork.${C_RST}"
+    log "${C_YELLOW}Current directory:${C_RST} $WORKDIR"
+    log "${C_YELLOW}Allowed root:${C_RST}     $ALLOWED_ROOT"
+    exit 1
+    ;;
+esac
+
+# ── Sandbox name (per-directory) ─────────────────────────────────────────────
+SANDBOX_NAME="omp-$(basename "$WORKDIR" | tr -cd '[:alnum:]_-')"
+
+# ── Audit logging ────────────────────────────────────────────────────────────
+# Log each launcher invocation. This is intentionally host-side, not inside the
+# sandbox, so there is a durable record even if the sandbox is recreated.
+OMP_GUARD_LOG_DIR="${OMP_GUARD_LOG_DIR:-$HOME/AgentWork/.omp-guard-logs}"
+OMP_GUARD_LAUNCH_LOG="$OMP_GUARD_LOG_DIR/launch.log"
+mkdir -p "$OMP_GUARD_LOG_DIR"
+chmod 700 "$OMP_GUARD_LOG_DIR"
+
+if [ "$#" -eq 0 ]; then
+  OMP_GUARD_MODE="interactive"
+else
+  OMP_GUARD_MODE="one-shot"
+fi
+
+{
+  printf 'ts=%s' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  printf '\tuser=%s' "$(id -un)"
+  printf '\tworkdir=%s' "$WORKDIR"
+  printf '\tallowed_root=%s' "$ALLOWED_ROOT"
+  printf '\tsandbox=%s' "$SANDBOX_NAME"
+  printf '\tmode=%s' "$OMP_GUARD_MODE"
+  printf '\tconfig_state=%s' "$OMP_GUARD_STATE"
+  printf '\tgithub_auth_mounted=no'
+  printf '\n'
+} >> "$OMP_GUARD_LAUNCH_LOG"
+chmod 600 "$OMP_GUARD_LAUNCH_LOG"
+
+# ── Check if sandbox already exists ──────────────────────────────────────────
+sandbox_exists() {
+  # Use awk to match the SANDBOX column exactly (first field, avoids
+  # false positives like omp-Foo matching omp-Foo-parallel2).
+  sbx ls 2>/dev/null | awk -v name="$1" 'NR>1 && $1 == name {found=1} END {exit !found}'
+}
+
+# Handle --new: remove existing sandbox before creating
+if $FORCE_NEW && sandbox_exists "$SANDBOX_NAME"; then
+  log "${C_DIM}omp-sbx: removing existing sandbox '$SANDBOX_NAME' (--new)${C_RST}"
+  sbx rm -f "$SANDBOX_NAME" >/dev/null 2>&1 || true
+fi
+
+EXISTS=false
+sandbox_exists "$SANDBOX_NAME" && EXISTS=true
+
+# ── Banner ───────────────────────────────────────────────────────────────────
+log "${C_BOLD}${C_CYAN}╭─ omp-sbx ─────────────────────────────────────────────────╮${C_RST}"
+log "${C_CYAN}│${C_RST} template  : ${TEMPLATE}"
+log "${C_CYAN}│${C_RST} workspace : ${WORKDIR}  ${C_DIM}→ /home/agent/workspace${C_RST}"
+log "${C_CYAN}│${C_RST} config    : ${OMP_GUARD_STATE}  ${C_DIM}(guard-scoped, via symlink)${C_RST}"
+log "${C_CYAN}│${C_RST} gh session: ${C_YELLOW}not mounted by default${C_RST}"
+log "${C_CYAN}│${C_RST} sandbox   : ${SANDBOX_NAME}  ${C_DIM}($([ "$EXISTS" = true ] && echo 'resuming' || echo 'new'))${C_RST}"
+if [ "$#" -eq 0 ]; then
+  log "${C_CYAN}│${C_RST} mode      : ${C_GREEN}interactive TUI${C_RST}"
+else
+  log "${C_CYAN}│${C_RST} mode      : ${C_GREEN}omp $*${C_RST}"
+fi
+log "${C_BOLD}${C_CYAN}╰─ starting omp inside the sbx sandbox ──────────────────────╯${C_RST}"
+log ""
+# ── Launch ───────────────────────────────────────────────────────────────────
+# Two-phase approach for interactive mode:
+#   1. sbx create (non-interactive) — captures warnings to stderr where the
+#      user can read them before omp clears the screen.
+#   2. Pause — "press any key" gives time to read the warnings.
+#   3. sbx run --name (attaches to TUI) — omp launches and clears screen.
+# For non-interactive mode, reuse the sandbox or create silently, then exec.
+if [ "$#" -eq 0 ] && [ -t 0 ]; then
+  # Interactive TUI.
+  if ! $EXISTS; then
+    # Phase 1: create the sandbox, surfacing warnings on stderr. Capture the
+    # output so a failed create can be classified: a "name already taken"
+    # error is a false negative from sandbox_exists — after a force-quit the
+    # sandbox is left stopped, and sbx ls may omit stopped sandboxes, so our
+    # name match missed it and we tried to create over an existing name.
+    # Recover by re-attaching (Phase 3) instead of erroring out.
+    if create_out="$(sbx create --kit "$KIT_DIR" --template "$TEMPLATE" --name "$SANDBOX_NAME" \
+        omp "$WORKDIR" "${MOUNTS[@]}" 2>&1)"; then
+      if [ -n "$create_out" ]; then printf '%s\n' "$create_out" >&2; fi
+      # Wait for startup commands (symlink creation) to complete.
+      sleep 2
+    else
+      if [ -n "$create_out" ]; then printf '%s\n' "$create_out" >&2; fi
+      if printf '%s' "$create_out" | grep -qiE 'already exists|given new workspaces'; then
+        log "${C_DIM}omp-sbx: sandbox already exists (stopped?), will re-attach${C_RST}"
+      else
+        log "${C_RED}omp-sbx: failed to create sandbox${C_RST}"
+        exit 1
+      fi
+    fi
+  fi
+
+  # Phase 2: pause so the user can read sbx warnings before omp clears screen.
+  if ! $SKIP_PAUSE; then
+    log ""
+    log "${C_GREEN}Press any key to launch omp (or --yes to skip this)...${C_RST}"
+    read -rsn1 < /dev/tty
+    log ""
+  fi
+
+  # Phase 3: attach to the sandbox TUI. Must pass --kit so sbx knows the "omp"
+  # agent definition (it's not a built-in agent). sbx run --name re-attaches to
+  # a running agent, or restarts a stopped sandbox's agent. If re-attach fails
+  # (a force-quit can leave the agent process wedged), stop+restart the sandbox;
+  # omp session state lives in the shared ~/.omp mount so the conversation
+  # resumes. Last resort: remove + recreate.
+  if ! sbx run --kit "$KIT_DIR" --name "$SANDBOX_NAME" 2>&1; then
+    log "${C_DIM}omp-sbx: re-attach failed; restarting sandbox...${C_RST}"
+    sbx stop "$SANDBOX_NAME" >/dev/null 2>&1 || true
+    if ! sbx run --kit "$KIT_DIR" --name "$SANDBOX_NAME" 2>&1; then
+      log "${C_DIM}omp-sbx: sandbox unresponsive, recreating...${C_RST}"
+      sbx rm -f "$SANDBOX_NAME" >/dev/null 2>&1 || true
+      if ! sbx create --kit "$KIT_DIR" --template "$TEMPLATE" --name "$SANDBOX_NAME" \
+          omp "$WORKDIR" "${MOUNTS[@]}" 2>&1; then
+        log "${C_RED}omp-sbx: failed to create sandbox${C_RST}"
+        exit 1
+      fi
+      sleep 2
+      exec sbx run --kit "$KIT_DIR" --name "$SANDBOX_NAME"
+    fi
+  fi
+else
+  # Non-interactive — create if needed, then exec omp with args.
+  if ! $EXISTS; then
+    # Same false-negative recovery as interactive mode: a create failure here
+    # is usually a name collision with a stopped sandbox left by a force-quit.
+    # sbx exec starts a stopped sandbox, so fall through and let it run.
+    if ! sbx create --kit "$KIT_DIR" --template "$TEMPLATE" --name "$SANDBOX_NAME" \
+        omp "$WORKDIR" "${MOUNTS[@]}" >/dev/null 2>&1; then
+      : # already exists or transient — sbx exec surfaces real errors
+    else
+      sleep 2
+    fi
+  fi
+  exec sbx exec "$SANDBOX_NAME" omp "$@"
+fi
