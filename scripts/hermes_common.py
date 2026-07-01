@@ -1,0 +1,179 @@
+from __future__ import annotations
+
+import os
+import re
+import shutil
+import stat
+import subprocess
+from pathlib import Path
+
+
+ROOT = Path(__file__).resolve().parent.parent
+PROFILE_RE = re.compile(r"^[a-z][a-z0-9-]{1,62}$")
+CORE_PROFILES = [
+    "chief-of-staff",
+    "researcher",
+    "marketer",
+    "developer",
+    "reviewer",
+    "operator",
+    "librarian",
+]
+
+PROFILE_POLICIES = {
+    "chief-of-staff": "hermes-orchestrator.yml",
+    "operator": "hermes-orchestrator.yml",
+    "researcher": "hermes-research.yml",
+    "marketer": "hermes-research.yml",
+    "librarian": "hermes-research.yml",
+    "developer": "hermes-dev.yml",
+    "reviewer": "hermes-dev.yml",
+}
+
+TOKEN_ENV_KEYS = [
+    "GITHUB_TOKEN",
+    "GH_TOKEN",
+    "GITHUB_PAT",
+    "COPILOT_GITHUB_TOKEN",
+]
+
+
+def is_under(path: Path, root: Path) -> bool:
+    try:
+        path.resolve().relative_to(root.resolve())
+        return True
+    except ValueError:
+        return False
+
+
+def allowed_root() -> Path:
+    return Path(os.environ.get("OMP_GUARD_ALLOWED_ROOT", str(Path.home() / "AgentWork"))).expanduser().resolve()
+
+
+def hermes_root() -> Path:
+    return Path(os.environ.get("HERMES_GUARD_ROOT", str(allowed_root() / "hermes"))).expanduser().resolve()
+
+
+def projects_root() -> Path:
+    return allowed_root() / "projects"
+
+
+def profile_name_is_safe(profile: str) -> bool:
+    return bool(PROFILE_RE.fullmatch(profile)) and ".." not in profile and "/" not in profile
+
+
+def validate_profile_name(profile: str) -> None:
+    if not profile_name_is_safe(profile):
+        raise ValueError(
+            "unsafe Hermes profile name. Use lower-case letters, numbers, and dashes; "
+            "start with a letter; do not use slashes or '..'."
+        )
+
+
+def profile_root(profile: str) -> Path:
+    validate_profile_name(profile)
+    root = hermes_root() / "profiles" / profile
+    if not is_under(root, allowed_root()):
+        raise ValueError(f"computed HERMES_HOME escapes AgentWork: {root}")
+    return root.resolve()
+
+
+def profile_paths(profile: str) -> dict[str, Path]:
+    root = profile_root(profile)
+    return {
+        "root": root,
+        "home": root / "home",
+        "tmp": root / "tmp",
+        "xdg_config": root / "xdg-config",
+        "xdg_cache": root / "xdg-cache",
+        "xdg_data": root / "xdg-data",
+        "logs": root / "logs",
+        "skills": root / "skills",
+        "memories": root / "memories",
+    }
+
+
+def ensure_private_dir(path: Path) -> None:
+    existed = path.exists()
+    path.mkdir(parents=True, exist_ok=True)
+    if existed:
+        mode = stat.S_IMODE(path.stat().st_mode)
+        if mode & 0o077:
+            raise PermissionError(f"directory permissions too open: {path} is {oct(mode)}, expected 0700")
+    path.chmod(0o700)
+
+
+def ensure_profile_dirs(profile: str) -> dict[str, Path]:
+    paths = profile_paths(profile)
+    for path in paths.values():
+        ensure_private_dir(path)
+    return paths
+
+
+def check_private_dir(path: Path) -> tuple[bool, str]:
+    if not path.exists():
+        return False, f"missing directory: {path}"
+    if not path.is_dir():
+        return False, f"not a directory: {path}"
+    mode = stat.S_IMODE(path.stat().st_mode)
+    if mode != 0o700:
+        return False, f"permissions are {oct(mode)}, expected 0700: {path}"
+    return True, f"private directory: {path}"
+
+
+def policy_for_profile(profile: str) -> Path:
+    explicit = os.environ.get("HERMES_GUARD_POLICY")
+    if explicit:
+        return Path(explicit).expanduser().resolve()
+    return (ROOT / "policies" / PROFILE_POLICIES.get(profile, "hermes-v1.yml")).resolve()
+
+
+def find_hermes_bin() -> str | None:
+    return os.environ.get("HERMES_GUARD_HERMES_BIN") or shutil.which("hermes")
+
+
+def scrubbed_env(base: dict[str, str] | None = None) -> tuple[dict[str, str], list[str]]:
+    env = dict(base or os.environ)
+    scrubbed: list[str] = []
+    for key in TOKEN_ENV_KEYS:
+        if key in env:
+            scrubbed.append(key)
+            env.pop(key, None)
+    return env, scrubbed
+
+
+def forbidden_workdir_prefixes() -> list[Path]:
+    actual_home = Path.home()
+    personal_home = os.environ.get("OMP_GUARD_PERSONAL_HOME")
+    if not personal_home:
+        raise RuntimeError("OMP_GUARD_PERSONAL_HOME is not set — refusing to launch without personal home protection")
+    return [
+        Path(personal_home),
+        Path("/Users/Shared"),
+        actual_home / "Desktop",
+        actual_home / "Documents",
+        actual_home / "Downloads",
+        actual_home / "Library" / "Mobile Documents",
+    ]
+
+
+def assert_safe_workdir(workdir: Path, *, require_project_cwd: bool) -> None:
+    workdir = workdir.resolve()
+    root = allowed_root()
+    if not is_under(workdir, root):
+        raise RuntimeError(f"refusing to launch outside AgentWork: {workdir} (allowed root: {root})")
+    if require_project_cwd and not is_under(workdir, projects_root()):
+        raise RuntimeError(f"refusing to launch outside AgentWork/projects: {workdir} (projects root: {projects_root()})")
+    for prefix in forbidden_workdir_prefixes():
+        if prefix.exists() and is_under(workdir, prefix):
+            raise RuntimeError(f"refusing to launch under forbidden path: {prefix}")
+
+
+def run(command: list[str], *, cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        command,
+        cwd=str(cwd or ROOT),
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
