@@ -130,10 +130,10 @@ def check_central_launch_log(reporter: Reporter) -> None:
         log_path.chmod(0o600)
         reporter.ok(f"central Hermes launch log is writable: {log_path}")
     except OSError as exc:
+        fallback = hc.profile_root("chief-of-staff") / "logs" / "hermes-launch.log"
         reporter.warn(
             f"central Hermes launch log is not writable: {log_path}: {exc}. "
-            "Future launches also write a profile-local fallback at "
-            "~/AgentWork/hermes/profiles/<profile>/logs/hermes-launch.log. "
+            f"Future launches also write a profile-local fallback at {fallback}. "
             "Repair the central log with chown/chmod from the agent account if you still want cross-profile audit."
         )
 
