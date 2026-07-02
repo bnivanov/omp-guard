@@ -153,6 +153,16 @@ def hermes_runtime_read_paths(hermes_bin: str, actual_home: Path) -> list[Path]:
     return deduped
 
 
+def maybe_dump_seatbelt_profile(profile_text: str) -> None:
+    dump_path = os.environ.get("HERMES_GUARD_DUMP_SEATBELT_PROFILE", "").strip()
+    if not dump_path:
+        return
+    path = Path(dump_path).expanduser()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(profile_text, encoding="utf-8")
+    path.chmod(0o600)
+
+
 def main() -> int:
     args, hermes_args = parse_args(sys.argv[1:])
     profile = args.profile
@@ -192,6 +202,7 @@ def main() -> int:
     env["XDG_CONFIG_HOME"] = str(paths["xdg_config"])
     env["XDG_CACHE_HOME"] = str(paths["xdg_cache"])
     env["XDG_DATA_HOME"] = str(paths["xdg_data"])
+    env["XDG_STATE_HOME"] = str(paths["state"])
     env["TMPDIR"] = str(paths["tmp"])
     env["HERMES_GUARD_PROFILE"] = profile
     env["HERMES_GUARD_POLICY_EFFECTIVE"] = str(policy_file)
@@ -228,6 +239,7 @@ def main() -> int:
 
     hermes_argv = [hermes_bin, "gateway", *hermes_args] if args.gateway else [hermes_bin, *hermes_args]
     runtime_read_paths = hermes_runtime_read_paths(hermes_bin, actual_home)
+    runtime_write_paths = hc.profile_local_runtime_paths(profile)
     ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     make_private_file_append(
         hc.allowed_root() / ".omp-guard-logs" / "hermes-launch.log",
@@ -238,12 +250,14 @@ def main() -> int:
                 f"profile={profile}",
                 f"workdir={workdir}",
                 f"hermes_home={paths['root']}",
+                f"xdg_state_home={paths['state']}",
                 f"policy={policy_file}",
                 f"github_tokens_scrubbed={','.join(scrubbed) if scrubbed else 'none'}",
                 f"seatbelt={'on' if enforce else 'off'}",
                 f"seatbelt_detail={cap_detail}",
                 f"egress_proxy={'127.0.0.1:' + str(proxy_port) if proxy_port else 'none'}",
                 f"runtime_read_paths={','.join(str(path) for path in runtime_read_paths)}",
+                f"runtime_write_paths={','.join(str(path) for path in runtime_write_paths)}",
                 f"mode={'gateway' if args.gateway else 'hermes'} {' '.join(hermes_args) if hermes_args else '(interactive)'}",
             ]
         ),
@@ -259,7 +273,9 @@ def main() -> int:
         tmp_dir=paths["tmp"],
         proxy_port=proxy_port,
         extra_read_paths=runtime_read_paths,
+        extra_write_paths=runtime_write_paths,
     )
+    maybe_dump_seatbelt_profile(sb_profile)
     wrapped = seatbelt.wrap_command(profile=sb_profile, argv=hermes_argv)
 
     def _cleanup() -> None:
