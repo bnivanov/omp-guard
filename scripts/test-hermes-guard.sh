@@ -37,6 +37,7 @@ for policy in policies/hermes-v1.yml policies/hermes-orchestrator.yml policies/h
 done
 
 TMP_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/hermes-guard-test.XXXXXX")"
+TMP_ROOT="$(python3 -c 'from pathlib import Path; import sys; print(Path(sys.argv[1]).resolve())' "$TMP_ROOT")"
 trap 'rm -rf "$TMP_ROOT"' EXIT
 mkdir -p "$TMP_ROOT/projects/probe" "$TMP_ROOT/personal" "$TMP_ROOT/bin" "$TMP_ROOT/runtime/hermes-agent"
 
