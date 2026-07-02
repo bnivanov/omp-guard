@@ -196,7 +196,8 @@ env.update(
         "TMPDIR": str(paths["tmp"]),
     }
 )
-cmd = seatbelt.wrap_command(profile=profile, argv=[sys.executable, "-c", code])
+python_bin = "/usr/bin/python3" if Path("/usr/bin/python3").exists() else sys.executable
+cmd = seatbelt.wrap_command(profile=profile, argv=[python_bin, "-c", code])
 result = subprocess.run(cmd, cwd=str(workspace), env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 if result.returncode != 0:
     print(result.stdout)
