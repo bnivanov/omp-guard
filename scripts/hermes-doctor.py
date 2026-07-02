@@ -110,6 +110,34 @@ def check_seatbelt(reporter: Reporter) -> None:
         reporter.warn(f"Seatbelt unavailable: {detail}")
 
 
+def check_central_launch_log(reporter: Reporter) -> None:
+    log_dir = hc.allowed_root() / ".omp-guard-logs"
+    log_path = log_dir / "hermes-launch.log"
+    try:
+        log_dir.mkdir(parents=True, exist_ok=True)
+        log_dir.chmod(0o700)
+    except OSError as exc:
+        reporter.fail(f"central Hermes launch log directory is not writable: {log_dir}: {exc}")
+        return
+
+    if not log_path.exists():
+        reporter.ok(f"central Hermes launch log not created yet: {log_path}")
+        return
+
+    try:
+        with log_path.open("a", encoding="utf-8"):
+            pass
+        log_path.chmod(0o600)
+        reporter.ok(f"central Hermes launch log is writable: {log_path}")
+    except OSError as exc:
+        reporter.warn(
+            f"central Hermes launch log is not writable: {log_path}: {exc}. "
+            "Future launches also write a profile-local fallback at "
+            "~/AgentWork/hermes/profiles/<profile>/logs/hermes-launch.log. "
+            "Repair the central log with chown/chmod from the agent account if you still want cross-profile audit."
+        )
+
+
 def check_profiles(reporter: Reporter) -> None:
     existing = []
     missing = []
@@ -141,6 +169,7 @@ def main() -> int:
     check_policies(reporter)
     check_hermes_binary(reporter)
     check_seatbelt(reporter)
+    check_central_launch_log(reporter)
     check_profiles(reporter)
 
     print()
