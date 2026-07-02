@@ -35,6 +35,11 @@ TOKEN_ENV_KEYS = [
     "GH_TOKEN",
     "GITHUB_PAT",
     "COPILOT_GITHUB_TOKEN",
+    "OPENAI_API_KEY",
+    "ANTHROPIC_API_KEY",
+    "OPENROUTER_API_KEY",
+    "OPENCODE_API_KEY",
+    "OPENCODE_GO_API_KEY",
 ]
 
 PROFILE_DIR_KEYS = [
@@ -73,6 +78,55 @@ def hermes_root() -> Path:
 
 def projects_root() -> Path:
     return allowed_root() / "projects"
+
+
+def guard_log_dir() -> Path:
+    return allowed_root() / ".omp-guard-logs"
+
+
+def guard_tmp_root() -> Path:
+    return allowed_root() / ".omp-guard-tmp" / "hermes-light"
+
+
+def canonical_hermes_home(actual_home: Path | None = None) -> Path:
+    """Return the canonical Hermes Desktop/CLI home for Stage A.
+
+    Stage A deliberately uses Hermes' real account-level state so the Desktop
+    app, CLI, auth, model cache, sessions, and updates remain compatible. Tests
+    may set HOME to a temporary account root; the canonical home remains
+    exactly $HOME/.hermes.
+    """
+    home = (actual_home or Path.home()).expanduser().resolve()
+    explicit = os.environ.get("HERMES_GUARD_CANONICAL_HOME", "").strip()
+    if explicit:
+        return Path(explicit).expanduser().resolve()
+    return (home / ".hermes").resolve()
+
+
+def validate_canonical_hermes_home(actual_home: Path | None = None) -> tuple[Path, str]:
+    home = (actual_home or Path.home()).expanduser().resolve()
+    canonical = canonical_hermes_home(home)
+    expected = (home / ".hermes").resolve()
+    if canonical != expected:
+        raise ValueError(f"canonical Hermes home must be exactly {expected}; got {canonical}")
+    if not canonical.exists():
+        raise FileNotFoundError(f"canonical Hermes home is missing: {canonical}")
+    ok, message = check_private_dir(canonical)
+    if not ok:
+        raise PermissionError(message)
+    return canonical, message
+
+
+def ensure_guard_tmp_dir() -> Path:
+    path = guard_tmp_root()
+    ensure_private_dir(path)
+    return path
+
+
+def ensure_guard_log_dir() -> Path:
+    path = guard_log_dir()
+    ensure_private_dir(path)
+    return path
 
 
 def profile_name_is_safe(profile: str) -> bool:
@@ -116,12 +170,11 @@ def profile_paths(profile: str) -> dict[str, Path]:
 
 
 def profile_local_runtime_paths(profile: str) -> list[Path]:
-    """Return profile-local paths Hermes may use for runtime state.
+    """Return profile-local paths Hermes may use for the advanced isolated mode.
 
-    Hermes and its Python dependencies can use both explicit XDG paths and
-    conventional HOME-relative paths such as ~/.local/state/hermes. Keeping
-    these paths profile-local avoids falling back to the real macOS home while
-    giving SQLite/session state predictable writable locations under AgentWork.
+    This remains available for future experiments, but it is no longer the
+    default Stage A runtime because Hermes Desktop and CLI expect canonical
+    state under $HOME/.hermes.
     """
     paths = profile_paths(profile)
     home = paths["home"]
@@ -149,6 +202,19 @@ def profile_local_runtime_paths(profile: str) -> list[Path]:
         home / ".cache" / "hermes",
     ]
 
+    deduped: list[Path] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        resolved = candidate.resolve()
+        key = str(resolved)
+        if key not in seen:
+            deduped.append(resolved)
+            seen.add(key)
+    return deduped
+
+
+def canonical_runtime_write_paths(canonical_home: Path, tmp_dir: Path, log_dir: Path) -> list[Path]:
+    candidates = [canonical_home, tmp_dir, log_dir]
     deduped: list[Path] = []
     seen: set[str] = set()
     for candidate in candidates:
