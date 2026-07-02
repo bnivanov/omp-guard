@@ -129,8 +129,8 @@ def build_profile(
     extra_writes = _dedupe_paths(extra_write_paths or [])
 
     # System/runtime read roots the Node/Python runtime and common CLIs need.
-    # These are read-only; none grant access to user data. /var/select is
-    # needed by Apple's xcode-select/xcrun shims to find Command Line Tools.
+    # These are read-only; none grant access to user data. The xcode-select
+    # database link is needed so Apple shims do not falsely trigger CLT install.
     read_roots = [
         "/usr",
         "/bin",
@@ -141,6 +141,8 @@ def build_profile(
         "/opt/local",
         "/private/var/db/dyld",
         "/private/var/db/timezone",
+        "/private/var/db/xcode_select_link",
+        "/var/db/xcode_select_link",
         "/private/var/select",
         "/var/select",
         "/etc",

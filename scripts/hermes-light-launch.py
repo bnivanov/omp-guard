@@ -130,6 +130,31 @@ def parse_args(argv: list[str]) -> tuple[argparse.Namespace, list[str]]:
     return args, rest
 
 
+def selected_xcode_developer_dir() -> Path | None:
+    tool = Path("/usr/bin/xcode-select")
+    if not tool.exists():
+        return None
+    try:
+        result = subprocess.run(
+            [str(tool), "-p"],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            timeout=5,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if result.returncode != 0:
+        return None
+    raw = result.stdout.strip()
+    if not raw:
+        return None
+    path = Path(raw).resolve()
+    if path.exists():
+        return path
+    return None
+
+
 def hermes_runtime_read_paths(hermes_bin: str, actual_home: Path) -> list[Path]:
     """Return narrow read-only runtime paths needed to execute Hermes itself.
 
@@ -151,6 +176,9 @@ def hermes_runtime_read_paths(hermes_bin: str, actual_home: Path) -> list[Path]:
             actual_home / ".local" / "share" / "uv" / "python",
         ]
     )
+    xcode_dir = selected_xcode_developer_dir()
+    if xcode_dir is not None:
+        candidates.append(xcode_dir)
 
     for candidate in candidates:
         try:

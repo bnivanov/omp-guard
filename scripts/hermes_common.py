@@ -213,11 +213,28 @@ def profile_local_runtime_paths(profile: str) -> list[Path]:
     return deduped
 
 
+def canonical_sidecar_paths(canonical_home: Path) -> list[Path]:
+    """Return narrow HOME-relative Hermes sidecar paths used by dependencies.
+
+    Even with HERMES_HOME set, Python/Node libraries may consult appdirs/XDG
+    defaults under the real account home. We allow only Hermes-scoped sidecars,
+    not broad ~/.local, ~/.cache, or ~/.config.
+    """
+    home = canonical_home.parent.resolve()
+    return [
+        home / ".local" / "state" / "hermes",
+        home / ".local" / "share" / "hermes",
+        home / ".cache" / "hermes",
+        home / ".config" / "hermes",
+    ]
+
+
 def canonical_runtime_write_paths(canonical_home: Path, tmp_dir: Path, log_dir: Path) -> list[Path]:
-    candidates = [canonical_home, tmp_dir, log_dir]
+    candidates = [canonical_home, *canonical_sidecar_paths(canonical_home), tmp_dir, log_dir]
     deduped: list[Path] = []
     seen: set[str] = set()
     for candidate in candidates:
+        ensure_private_dir(candidate)
         resolved = candidate.resolve()
         key = str(resolved)
         if key not in seen:
