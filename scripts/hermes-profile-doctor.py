@@ -156,8 +156,12 @@ def main() -> int:
     else:
         reporter.fail(f"HERMES_HOME escapes AgentWork: {paths['root']}")
 
-    for key in ["root", "home", "tmp", "xdg_config", "xdg_cache", "xdg_data", "logs", "skills", "memories"]:
+    for key in hc.PROFILE_DIR_KEYS:
         ok, message = hc.check_private_dir(paths[key])
+        (reporter.ok if ok else reporter.fail)(message)
+
+    for path in hc.profile_local_runtime_paths(profile):
+        ok, message = hc.check_private_dir(path)
         (reporter.ok if ok else reporter.fail)(message)
 
     check_file_private(paths["root"] / "SOUL.md", reporter, "SOUL.md")
