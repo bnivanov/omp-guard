@@ -135,14 +135,26 @@ if canonical != expected.resolve():
     raise SystemExit(f"unexpected canonical home: {canonical}")
 log_dir = hc.ensure_guard_log_dir()
 tmp_dir = hc.ensure_guard_tmp_dir()
-for path in (canonical, log_dir, tmp_dir):
+write_paths = hc.canonical_runtime_write_paths(canonical, tmp_dir, log_dir)
+required = [
+    canonical,
+    Path(os.environ["HOME"]) / ".local" / "state" / "hermes",
+    Path(os.environ["HOME"]) / ".local" / "share" / "hermes",
+    Path(os.environ["HOME"]) / ".cache" / "hermes",
+    Path(os.environ["HOME"]) / ".config" / "hermes",
+    log_dir,
+    tmp_dir,
+]
+for path in required:
     if not path.exists():
         raise SystemExit(f"missing canonical Stage A path: {path}")
+    if path.resolve() not in write_paths:
+        raise SystemExit(f"missing canonical write path: {path}")
 print("CANONICAL_STAGE_A_PATHS_OK")
 PY
 )"
 assert_contains "$out" "CANONICAL_STAGE_A_PATHS_OK"
-pass "canonical Hermes home and guard runtime paths validate"
+pass "canonical Hermes home, sidecar, and guard runtime paths validate"
 
 out="$(env "${COMMON_ENV[@]}" python3 - <<'PY'
 from pathlib import Path
@@ -157,27 +169,33 @@ workspace = Path(os.environ["OMP_GUARD_ALLOWED_ROOT"]) / "projects" / "probe"
 canonical, _ = hc.validate_canonical_hermes_home(Path(os.environ["HOME"]))
 tmp_dir = hc.ensure_guard_tmp_dir()
 log_dir = hc.ensure_guard_log_dir()
+write_paths = hc.canonical_runtime_write_paths(canonical, tmp_dir, log_dir)
 profile = seatbelt.build_profile(
     workspace=workspace,
     state_dir=canonical,
     tmp_dir=tmp_dir,
     proxy_port=12345,
     extra_read_paths=[Path(os.environ["HERMES_GUARD_RUNTIME_DIR"])],
-    extra_write_paths=hc.canonical_runtime_write_paths(canonical, tmp_dir, log_dir),
+    extra_write_paths=write_paths,
 )
 required = [
     "(allow file-ioctl)",
     str(workspace),
     str(canonical),
+    str(Path(os.environ["HOME"]) / ".local" / "state" / "hermes"),
+    str(Path(os.environ["HOME"]) / ".cache" / "hermes"),
     str(tmp_dir),
     str(log_dir),
     str(Path(os.environ["HERMES_GUARD_RUNTIME_DIR"])),
+    "/private/var/db/xcode_select_link",
 ]
 for needle in required:
     if needle not in profile:
         raise SystemExit(f"missing Seatbelt rule for {needle}")
 for forbidden in (
     f'(subpath "{Path(os.environ["HOME"])}")',
+    f'(subpath "{Path(os.environ["HOME"]) / ".local"}")',
+    f'(subpath "{Path(os.environ["HOME"]) / ".cache"}")',
     f'(subpath "{Path(os.environ["OMP_GUARD_ALLOWED_ROOT"])}")',
     f'(subpath "{Path(os.environ["OMP_GUARD_ALLOWED_ROOT"]) / "personal"}")',
 ):
@@ -187,7 +205,7 @@ print("SEATBELT_CANONICAL_PROFILE_OK")
 PY
 )"
 assert_contains "$out" "SEATBELT_CANONICAL_PROFILE_OK"
-pass "Seatbelt profile allows canonical ~/.hermes but not broad account/root paths"
+pass "Seatbelt profile allows canonical Hermes sidecars but not broad account/root paths"
 
 set +e
 out="$(env "${COMMON_ENV[@]}" python3 scripts/hermes-profile-doctor.py ../bad 2>&1)"
@@ -220,6 +238,8 @@ for launch_log in "$central_launch_log" "$profile_launch_log"; do
   assert_contains "$log_text" "xdg_state_home=(unset)"
   assert_contains "$log_text" "tokens_scrubbed=GITHUB_TOKEN,GH_TOKEN,OPENAI_API_KEY,ANTHROPIC_API_KEY"
   assert_contains "$log_text" "runtime_read_paths=$TMP_ROOT/bin,$TMP_ROOT/runtime/hermes-agent,$TMP_ROOT/home/.hermes/hermes-agent"
+  assert_contains "$log_text" "$TMP_ROOT/home/.local/state/hermes"
+  assert_contains "$log_text" "$TMP_ROOT/home/.cache/hermes"
   assert_contains "$log_text" "$TMP_ROOT/.omp-guard-logs"
   assert_contains "$log_text" "$TMP_ROOT/.omp-guard-tmp/hermes-light"
 done
