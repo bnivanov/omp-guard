@@ -218,10 +218,12 @@ set -e
 assert_contains "$out" "unsafe Hermes profile name"
 pass "unsafe profile name is rejected"
 
-out="$((
-  cd "$TMP_ROOT/projects/probe"
-  env "${COMMON_ENV[@]}" python3 "$ROOT/scripts/hermes-light-launch.py" --profile chief-of-staff --version
-) 2>&1)"
+out="$(
+  (
+    cd "$TMP_ROOT/projects/probe"
+    env "${COMMON_ENV[@]}" python3 "$ROOT/scripts/hermes-light-launch.py" --profile chief-of-staff --version
+  ) 2>&1
+)"
 assert_contains "$out" "FAKE_HERMES_OK"
 pass "hermes-light launches under profile-scoped env with fake Hermes binary"
 
