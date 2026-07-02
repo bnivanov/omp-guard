@@ -228,16 +228,24 @@ out="$(
 assert_contains "$out" "FAKE_HERMES_OK"
 pass "hermes-light launches under profile-scoped env with fake Hermes binary"
 
-launch_log="$TMP_ROOT/.omp-guard-logs/hermes-launch.log"
-[ -f "$launch_log" ] || fail "missing Hermes launch log: $launch_log"
-log_text="$(cat "$launch_log")"
-assert_contains "$log_text" "profile=chief-of-staff"
-assert_contains "$log_text" "seatbelt=off"
-assert_contains "$log_text" "xdg_state_home=$TMP_ROOT/hermes/profiles/chief-of-staff/state"
-assert_contains "$log_text" "github_tokens_scrubbed=GITHUB_TOKEN,GH_TOKEN"
-assert_contains "$log_text" "runtime_read_paths=$TMP_ROOT/bin,$TMP_ROOT/runtime/hermes-agent"
-assert_contains "$log_text" "runtime_write_paths=$TMP_ROOT/hermes/profiles/chief-of-staff"
-pass "Hermes launch log captures Stage A runtime evidence"
+central_launch_log="$TMP_ROOT/.omp-guard-logs/hermes-launch.log"
+profile_launch_log="$TMP_ROOT/hermes/profiles/chief-of-staff/logs/hermes-launch.log"
+[ -f "$central_launch_log" ] || fail "missing central Hermes launch log: $central_launch_log"
+[ -f "$profile_launch_log" ] || fail "missing profile-local Hermes launch log: $profile_launch_log"
+for launch_log in "$central_launch_log" "$profile_launch_log"; do
+  log_text="$(cat "$launch_log")"
+  assert_contains "$log_text" "profile=chief-of-staff"
+  assert_contains "$log_text" "seatbelt=off"
+  assert_contains "$log_text" "xdg_state_home=$TMP_ROOT/hermes/profiles/chief-of-staff/state"
+  assert_contains "$log_text" "github_tokens_scrubbed=GITHUB_TOKEN,GH_TOKEN"
+  assert_contains "$log_text" "runtime_read_paths=$TMP_ROOT/bin,$TMP_ROOT/runtime/hermes-agent"
+  assert_contains "$log_text" "runtime_write_paths=$TMP_ROOT/hermes/profiles/chief-of-staff"
+done
+pass "Hermes launch logs capture central and profile-local Stage A runtime evidence"
+
+out="$(env "${COMMON_ENV[@]}" python3 scripts/hermes-doctor.py)"
+assert_contains "$out" "central Hermes launch log is writable"
+pass "hermes-doctor checks central launch log permissions"
 
 set +e
 out="$(env "${COMMON_ENV[@]}" python3 scripts/hermes-light-launch.py --profile chief-of-staff --version 2>&1)"
