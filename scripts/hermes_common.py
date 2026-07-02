@@ -37,6 +37,23 @@ TOKEN_ENV_KEYS = [
     "COPILOT_GITHUB_TOKEN",
 ]
 
+PROFILE_DIR_KEYS = [
+    "root",
+    "home",
+    "tmp",
+    "xdg_config",
+    "xdg_cache",
+    "xdg_data",
+    "logs",
+    "sessions",
+    "state",
+    "cron",
+    "kanban",
+    "checkpoints",
+    "skills",
+    "memories",
+]
+
 
 def is_under(path: Path, root: Path) -> bool:
     try:
@@ -98,6 +115,51 @@ def profile_paths(profile: str) -> dict[str, Path]:
     }
 
 
+def profile_local_runtime_paths(profile: str) -> list[Path]:
+    """Return profile-local paths Hermes may use for runtime state.
+
+    Hermes and its Python dependencies can use both explicit XDG paths and
+    conventional HOME-relative paths such as ~/.local/state/hermes. Keeping
+    these paths profile-local avoids falling back to the real macOS home while
+    giving SQLite/session state predictable writable locations under AgentWork.
+    """
+    paths = profile_paths(profile)
+    home = paths["home"]
+    candidates = [
+        paths["root"],
+        paths["home"],
+        paths["tmp"],
+        paths["xdg_config"],
+        paths["xdg_cache"],
+        paths["xdg_data"],
+        paths["logs"],
+        paths["sessions"],
+        paths["state"],
+        paths["cron"],
+        paths["kanban"],
+        paths["checkpoints"],
+        paths["skills"],
+        paths["memories"],
+        home / ".local",
+        home / ".local" / "state",
+        home / ".local" / "state" / "hermes",
+        home / ".local" / "share",
+        home / ".local" / "share" / "hermes",
+        home / ".cache",
+        home / ".cache" / "hermes",
+    ]
+
+    deduped: list[Path] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        resolved = candidate.resolve()
+        key = str(resolved)
+        if key not in seen:
+            deduped.append(resolved)
+            seen.add(key)
+    return deduped
+
+
 def ensure_private_dir(path: Path) -> None:
     existed = path.exists()
     path.mkdir(parents=True, exist_ok=True)
@@ -110,7 +172,7 @@ def ensure_private_dir(path: Path) -> None:
 
 def ensure_profile_dirs(profile: str) -> dict[str, Path]:
     paths = profile_paths(profile)
-    for path in paths.values():
+    for path in list(paths.values()) + profile_local_runtime_paths(profile):
         ensure_private_dir(path)
     return paths
 
