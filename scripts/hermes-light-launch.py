@@ -34,6 +34,28 @@ def make_private_file_append(path: Path, line: str) -> None:
     path.chmod(0o600)
 
 
+def write_launch_logs(global_log: Path, profile_log: Path, line: str) -> None:
+    """Write central and profile-local launch evidence.
+
+    The central guard log is useful for cross-profile audit. The profile-local
+    copy is the Stage A fallback when an old central log has bad ownership or
+    permissions from earlier manual debugging.
+    """
+    failures: list[str] = []
+    wrote = False
+    for label, path in (("central", global_log), ("profile", profile_log)):
+        try:
+            make_private_file_append(path, line)
+            wrote = True
+        except OSError as exc:
+            failures.append(f"{label} launch log unavailable at {path}: {exc}")
+
+    if not wrote:
+        die("; ".join(failures), 5)
+    for failure in failures:
+        print(f"hermes-light: WARN: {failure}", file=sys.stderr)
+
+
 def seatbelt_policy() -> str:
     policy = os.environ.get("HERMES_GUARD_SEATBELT", "").strip().lower()
     if policy in {"auto", "require", "off"}:
@@ -241,26 +263,28 @@ def main() -> int:
     runtime_read_paths = hermes_runtime_read_paths(hermes_bin, actual_home)
     runtime_write_paths = hc.profile_local_runtime_paths(profile)
     ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    make_private_file_append(
+    launch_line = "\t".join(
+        [
+            f"ts={ts}",
+            f"user={user}",
+            f"profile={profile}",
+            f"workdir={workdir}",
+            f"hermes_home={paths['root']}",
+            f"xdg_state_home={paths['state']}",
+            f"policy={policy_file}",
+            f"github_tokens_scrubbed={','.join(scrubbed) if scrubbed else 'none'}",
+            f"seatbelt={'on' if enforce else 'off'}",
+            f"seatbelt_detail={cap_detail}",
+            f"egress_proxy={'127.0.0.1:' + str(proxy_port) if proxy_port else 'none'}",
+            f"runtime_read_paths={','.join(str(path) for path in runtime_read_paths)}",
+            f"runtime_write_paths={','.join(str(path) for path in runtime_write_paths)}",
+            f"mode={'gateway' if args.gateway else 'hermes'} {' '.join(hermes_args) if hermes_args else '(interactive)'}",
+        ]
+    )
+    write_launch_logs(
         hc.allowed_root() / ".omp-guard-logs" / "hermes-launch.log",
-        "\t".join(
-            [
-                f"ts={ts}",
-                f"user={user}",
-                f"profile={profile}",
-                f"workdir={workdir}",
-                f"hermes_home={paths['root']}",
-                f"xdg_state_home={paths['state']}",
-                f"policy={policy_file}",
-                f"github_tokens_scrubbed={','.join(scrubbed) if scrubbed else 'none'}",
-                f"seatbelt={'on' if enforce else 'off'}",
-                f"seatbelt_detail={cap_detail}",
-                f"egress_proxy={'127.0.0.1:' + str(proxy_port) if proxy_port else 'none'}",
-                f"runtime_read_paths={','.join(str(path) for path in runtime_read_paths)}",
-                f"runtime_write_paths={','.join(str(path) for path in runtime_write_paths)}",
-                f"mode={'gateway' if args.gateway else 'hermes'} {' '.join(hermes_args) if hermes_args else '(interactive)'}",
-            ]
-        ),
+        paths["logs"] / "hermes-launch.log",
+        launch_line,
     )
 
     if not enforce:
