@@ -71,6 +71,26 @@ def check_location(reporter: Reporter) -> None:
         reporter.fail("OMP_GUARD_PERSONAL_HOME is not set")
 
 
+def check_canonical_hermes_home(reporter: Reporter) -> None:
+    expected = (Path.home().resolve() / ".hermes").resolve()
+    try:
+        canonical, message = hc.validate_canonical_hermes_home(Path.home())
+    except (OSError, PermissionError, ValueError, FileNotFoundError) as exc:
+        reporter.fail(f"canonical Hermes home invalid: {exc}")
+        return
+    if canonical == expected:
+        reporter.ok(f"canonical Hermes home is exactly {expected}")
+    else:
+        reporter.fail(f"canonical Hermes home is {canonical}, expected {expected}")
+    reporter.ok(message)
+    for rel in ("config.yaml", "state.db"):
+        path = canonical / rel
+        if path.exists():
+            reporter.ok(f"canonical Hermes state contains {rel}: {path}")
+        else:
+            reporter.warn(f"canonical Hermes state does not yet contain {rel}: {path}")
+
+
 def check_hermes_binary(reporter: Reporter) -> None:
     hermes_bin = hc.find_hermes_bin()
     if not hermes_bin:
@@ -111,11 +131,10 @@ def check_seatbelt(reporter: Reporter) -> None:
 
 
 def check_central_launch_log(reporter: Reporter) -> None:
-    log_dir = hc.allowed_root() / ".omp-guard-logs"
+    log_dir = hc.guard_log_dir()
     log_path = log_dir / "hermes-launch.log"
     try:
-        log_dir.mkdir(parents=True, exist_ok=True)
-        log_dir.chmod(0o700)
+        hc.ensure_guard_log_dir()
     except OSError as exc:
         reporter.fail(f"central Hermes launch log directory is not writable: {log_dir}: {exc}")
         return
@@ -167,6 +186,7 @@ def main() -> int:
     check_location(reporter)
     check_required_files(reporter)
     check_policies(reporter)
+    check_canonical_hermes_home(reporter)
     check_hermes_binary(reporter)
     check_seatbelt(reporter)
     check_central_launch_log(reporter)

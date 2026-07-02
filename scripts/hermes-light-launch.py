@@ -38,7 +38,7 @@ def write_launch_logs(global_log: Path, profile_log: Path, line: str) -> None:
     """Write central and profile-local launch evidence.
 
     The central guard log is useful for cross-profile audit. The profile-local
-    copy is the Stage A fallback when an old central log has bad ownership or
+    copy remains a fallback when an old central log has bad ownership or
     permissions from earlier manual debugging.
     """
     failures: list[str] = []
@@ -115,6 +115,11 @@ def parse_args(argv: list[str]) -> tuple[argparse.Namespace, list[str]]:
     parser.add_argument("--profile", required=True, help="Hermes profile name, e.g. chief-of-staff or researcher.")
     parser.add_argument("--gateway", action="store_true", help="Run `hermes gateway` for the selected profile.")
     parser.add_argument(
+        "--profile-local-home",
+        action="store_true",
+        help="Advanced/debug mode: use the old profile-local HERMES_HOME instead of canonical ~/.hermes.",
+    )
+    parser.add_argument(
         "--allow-estate-cwd",
         action="store_true",
         help="Allow launching from AgentWork outside projects. Intended for controlled gateway runs only.",
@@ -128,14 +133,10 @@ def parse_args(argv: list[str]) -> tuple[argparse.Namespace, list[str]]:
 def hermes_runtime_read_paths(hermes_bin: str, actual_home: Path) -> list[Path]:
     """Return narrow read-only runtime paths needed to execute Hermes itself.
 
-    The installed `hermes` command is usually a small shim in `~/.local/bin`
-    that execs the real CLI from `~/.hermes/hermes-agent/venv/bin/hermes`.
-    The guarded profile must not be allowed to read the whole global
-    `~/.hermes` tree because that also contains config, sessions, logs, and
-    API keys. We therefore allow only the installed code/venv subtree.
-
-    Hermes' venv may also point at a uv-managed Python interpreter under
-    `~/.local/share/uv/python`, so that runtime is allowed read-only too.
+    In canonical mode ~/.hermes is writable as state, but the runtime code path
+    is still listed separately in launch evidence. In profile-local debug mode
+    this function prevents accidentally allowing all of global ~/.hermes when
+    only the installed code/venv subtree is needed.
     """
     paths: list[Path] = []
 
@@ -158,13 +159,10 @@ def hermes_runtime_read_paths(hermes_bin: str, actual_home: Path) -> list[Path]:
             continue
         if not resolved.exists():
             continue
-        # Do not allow the whole global ~/.hermes directory by accident. The
-        # installed code directory is acceptable; ~/.hermes itself is not.
         if resolved == (actual_home / ".hermes").resolve():
-            die("refusing to allow the whole global ~/.hermes directory as Hermes runtime")
+            die("refusing to allow the whole global ~/.hermes directory as Hermes runtime read path")
         paths.append(resolved)
 
-    # Preserve order while removing duplicates.
     deduped: list[Path] = []
     seen: set[str] = set()
     for path in paths:
@@ -185,6 +183,28 @@ def maybe_dump_seatbelt_profile(profile_text: str) -> None:
     path.chmod(0o600)
 
 
+def configure_canonical_env(env: dict[str, str], actual_home: Path) -> tuple[Path, Path, str]:
+    canonical_home, _ = hc.validate_canonical_hermes_home(actual_home)
+    tmp_dir = hc.ensure_guard_tmp_dir()
+    env["HERMES_HOME"] = str(canonical_home)
+    env["HOME"] = str(actual_home)
+    for key in ("XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME"):
+        env.pop(key, None)
+    env["TMPDIR"] = str(tmp_dir)
+    return canonical_home, tmp_dir, "canonical-hermes-home"
+
+
+def configure_profile_local_env(env: dict[str, str], paths: dict[str, Path]) -> tuple[Path, Path, str]:
+    env["HERMES_HOME"] = str(paths["root"])
+    env["HOME"] = str(paths["home"])
+    env["XDG_CONFIG_HOME"] = str(paths["xdg_config"])
+    env["XDG_CACHE_HOME"] = str(paths["xdg_cache"])
+    env["XDG_DATA_HOME"] = str(paths["xdg_data"])
+    env["XDG_STATE_HOME"] = str(paths["state"])
+    env["TMPDIR"] = str(paths["tmp"])
+    return paths["root"], paths["tmp"], "profile-local-hermes-home"
+
+
 def main() -> int:
     args, hermes_args = parse_args(sys.argv[1:])
     profile = args.profile
@@ -193,7 +213,7 @@ def main() -> int:
     except ValueError as exc:
         die(str(exc))
 
-    actual_home = Path.home()
+    actual_home = Path.home().resolve()
     user = getpass.getuser()
     work_user = os.environ.get("OMP_GUARD_WORK_USER", "")
     if work_user and user != work_user and os.environ.get("OMP_GUARD_ALLOW_OTHER_USER") != "1":
@@ -207,6 +227,7 @@ def main() -> int:
     try:
         hc.assert_safe_workdir(workdir, require_project_cwd=require_project_cwd)
         paths = hc.ensure_profile_dirs(profile)
+        guard_log_dir = hc.ensure_guard_log_dir()
     except (OSError, PermissionError, RuntimeError, ValueError) as exc:
         die(str(exc))
 
@@ -219,13 +240,17 @@ def main() -> int:
         die(f"Hermes policy file missing: {policy_file}")
 
     env, scrubbed = hc.scrubbed_env(os.environ)
-    env["HERMES_HOME"] = str(paths["root"])
-    env["HOME"] = str(paths["home"])
-    env["XDG_CONFIG_HOME"] = str(paths["xdg_config"])
-    env["XDG_CACHE_HOME"] = str(paths["xdg_cache"])
-    env["XDG_DATA_HOME"] = str(paths["xdg_data"])
-    env["XDG_STATE_HOME"] = str(paths["state"])
-    env["TMPDIR"] = str(paths["tmp"])
+    profile_local = args.profile_local_home or os.environ.get("HERMES_GUARD_PROFILE_LOCAL_HOME") == "1"
+    try:
+        if profile_local:
+            hermes_home, tmp_dir, home_mode = configure_profile_local_env(env, paths)
+            runtime_write_paths = hc.profile_local_runtime_paths(profile)
+        else:
+            hermes_home, tmp_dir, home_mode = configure_canonical_env(env, actual_home)
+            runtime_write_paths = hc.canonical_runtime_write_paths(hermes_home, tmp_dir, guard_log_dir)
+    except (OSError, PermissionError, RuntimeError, ValueError, FileNotFoundError) as exc:
+        die(str(exc))
+
     env["HERMES_GUARD_PROFILE"] = profile
     env["HERMES_GUARD_POLICY_EFFECTIVE"] = str(policy_file)
 
@@ -246,7 +271,7 @@ def main() -> int:
     proxy_proc = None
     proxy_port = None
     if enforce:
-        proxy_proc, proxy_port = start_egress_proxy(policy_file, paths["logs"])
+        proxy_proc, proxy_port = start_egress_proxy(policy_file, guard_log_dir)
         if proxy_proc is None:
             if os.environ.get("HERMES_GUARD_REQUIRE_PROXY", "1") != "0":
                 die("egress proxy failed to start while Seatbelt is enforced; refusing to launch", 4)
@@ -261,28 +286,31 @@ def main() -> int:
 
     hermes_argv = [hermes_bin, "gateway", *hermes_args] if args.gateway else [hermes_bin, *hermes_args]
     runtime_read_paths = hermes_runtime_read_paths(hermes_bin, actual_home)
-    runtime_write_paths = hc.profile_local_runtime_paths(profile)
     ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    xdg_state = env.get("XDG_STATE_HOME", "(unset)")
     launch_line = "\t".join(
         [
             f"ts={ts}",
             f"user={user}",
             f"profile={profile}",
+            f"home_mode={home_mode}",
             f"workdir={workdir}",
-            f"hermes_home={paths['root']}",
-            f"xdg_state_home={paths['state']}",
+            f"home={env.get('HOME')}",
+            f"hermes_home={hermes_home}",
+            f"xdg_state_home={xdg_state}",
+            f"tmpdir={tmp_dir}",
             f"policy={policy_file}",
-            f"github_tokens_scrubbed={','.join(scrubbed) if scrubbed else 'none'}",
+            f"tokens_scrubbed={','.join(scrubbed) if scrubbed else 'none'}",
             f"seatbelt={'on' if enforce else 'off'}",
             f"seatbelt_detail={cap_detail}",
             f"egress_proxy={'127.0.0.1:' + str(proxy_port) if proxy_port else 'none'}",
             f"runtime_read_paths={','.join(str(path) for path in runtime_read_paths)}",
             f"runtime_write_paths={','.join(str(path) for path in runtime_write_paths)}",
-            f"mode={'gateway' if args.gateway else 'hermes'} {' '.join(hermes_args) if hermes_args else '(interactive)'}",
+            f"mode={home_mode} {'gateway' if args.gateway else 'hermes'} {' '.join(hermes_args) if hermes_args else '(interactive)'}",
         ]
     )
     write_launch_logs(
-        hc.allowed_root() / ".omp-guard-logs" / "hermes-launch.log",
+        guard_log_dir / "hermes-launch.log",
         paths["logs"] / "hermes-launch.log",
         launch_line,
     )
@@ -293,8 +321,8 @@ def main() -> int:
 
     sb_profile = seatbelt.build_profile(
         workspace=workdir,
-        state_dir=paths["root"],
-        tmp_dir=paths["tmp"],
+        state_dir=hermes_home,
+        tmp_dir=tmp_dir,
         proxy_port=proxy_port,
         extra_read_paths=runtime_read_paths,
         extra_write_paths=runtime_write_paths,
