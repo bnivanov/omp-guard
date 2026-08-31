@@ -89,6 +89,17 @@ def _sbpl_literal(value: str) -> str:
     return value.replace("\\", "\\\\").replace('"', '\\"')
 
 
+def _dedupe_paths(paths: list[Path]) -> list[Path]:
+    deduped: list[Path] = []
+    seen: set[str] = set()
+    for path in paths:
+        key = str(path)
+        if key not in seen:
+            deduped.append(path)
+            seen.add(key)
+    return deduped
+
+
 def build_profile(
     *,
     workspace: Path,
@@ -96,13 +107,15 @@ def build_profile(
     tmp_dir: Path,
     proxy_port: int | None,
     extra_read_paths: list[Path] | None = None,
+    extra_write_paths: list[Path] | None = None,
 ) -> str:
     """Generate a deny-by-default SBPL profile for a light-mode agent.
 
-    Read/write is confined to `workspace`, `state_dir`, and `tmp_dir`.
-    Reads of system/runtime paths required by the Node/omp runtime are
-    allowed. Everything else — including other projects, the personal
-    account, and all credential paths — is denied by default (no allow rule).
+    Read/write is confined to `workspace`, `state_dir`, `tmp_dir`, and any
+    explicit guard-scoped `extra_write_paths`. Reads of system/runtime paths
+    required by the Node/Python/Hermes runtime are allowed. Everything else —
+    including other projects, the personal account, and all credential paths —
+    is denied by default (no allow rule).
 
     Network:
       * proxy_port set   -> outbound allowed ONLY to 127.0.0.1:<proxy_port>
@@ -112,9 +125,12 @@ def build_profile(
     ws = _sbpl_literal(str(workspace))
     st = _sbpl_literal(str(state_dir))
     tmp = _sbpl_literal(str(tmp_dir))
+    extra_reads = _dedupe_paths(extra_read_paths or [])
+    extra_writes = _dedupe_paths(extra_write_paths or [])
 
-    # System/runtime read roots the Node runtime and common CLIs need.
-    # These are read-only; none grant access to user data.
+    # System/runtime read roots the Node/Python runtime and common CLIs need.
+    # These are read-only; none grant access to user data. The xcode-select
+    # database link is needed so Apple shims do not falsely trigger CLT install.
     read_roots = [
         "/usr",
         "/bin",
@@ -125,6 +141,10 @@ def build_profile(
         "/opt/local",
         "/private/var/db/dyld",
         "/private/var/db/timezone",
+        "/private/var/db/xcode_select_link",
+        "/var/db/xcode_select_link",
+        "/private/var/select",
+        "/var/select",
         "/etc",
         "/private/etc",
         "/dev",
@@ -144,16 +164,20 @@ def build_profile(
     lines.append("(allow sysctl-read)")
     lines.append("(allow mach-lookup) ; broad (DNS/notify daemons); scope in a later pass")
     lines.append("(allow ipc-posix-shm)")
+    lines.append("; prompt_toolkit/Hermes needs terminal ioctl for raw-mode TTY control")
+    lines.append("(allow file-ioctl)")
     lines.append("")
     lines.append("; --- read-only system/runtime paths (no user data) ---")
     lines.append("(allow file-read*")
     lines.append(read_root_rules)
-    for extra in extra_read_paths or []:
+    for extra in extra_reads:
         lines.append(f'  (subpath "{_sbpl_literal(str(extra))}")')
-    # The workspace, state, and tmp are readable as well as writable.
+    # The workspace, state, tmp, and extra write paths are readable as well as writable.
     lines.append(f'  (subpath "{ws}")')
     lines.append(f'  (subpath "{st}")')
     lines.append(f'  (subpath "{tmp}")')
+    for extra in extra_writes:
+        lines.append(f'  (subpath "{_sbpl_literal(str(extra))}")')
     lines.append("  (literal \"/\")")
     lines.append("  (literal \"/dev/null\")")
     lines.append("  (literal \"/dev/random\")")
@@ -165,6 +189,8 @@ def build_profile(
     lines.append(f'  (subpath "{ws}")')
     lines.append(f'  (subpath "{st}")')
     lines.append(f'  (subpath "{tmp}")')
+    for extra in extra_writes:
+        lines.append(f'  (subpath "{_sbpl_literal(str(extra))}")')
     lines.append("  (literal \"/dev/null\")")
     lines.append("  (literal \"/dev/dtracehelper\")")
     lines.append(")")
